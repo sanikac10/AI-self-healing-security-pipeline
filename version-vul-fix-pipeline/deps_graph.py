@@ -1,187 +1,124 @@
 """deps_graph.py
 ============================================================
-Dependency graph builder for pinned *PyPI* requirements.txt files.
-
-This module performs two tasks:
-1.  `parse_requirements()` – robustly parses and validates a *pinned*
-    requirements file, returning a list of `ReqLine` objects.
-2.  `build_graph()` – calls the **deps.dev** public API to expand
-    direct requirements into a fully‑resolved *transitive* graph.
-
-Design notes
-------------
-* No package installation is performed (safer than running `pip`).
-* Responses are cached on disk *and* memoised in‑process to stay well
-  below deps.dev rate‑limits (10 req/s unauthenticated).
-* The resulting graph uses a tuple `(name, version)` as the node key to
-  avoid duplicate names across different version pins.
+Parses requirements.txt (pinned or loose) and builds a full
+dependency graph via deps.dev.
 """
 
 from __future__ import annotations
-
-import json
-import logging
-import os
-import re
-import time
+import json, logging, os, re, time
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Tuple, Set
 
 import networkx as nx
 import requests
-from packaging.markers import default_environment
 from packaging.requirements import Requirement
+from packaging.markers import default_environment
 from packaging.version import Version, InvalidVersion
+from packaging.specifiers import SpecifierSet
 
-from types import ReqLine
-
-# ------------------------------------------------------------------------
-# Module‑level constants
-# ------------------------------------------------------------------------
+from autoheal_types import ReqLine
 
 DEPSDEV_BASE = "https://api.deps.dev/v3alpha"
 CACHE_DIR = Path(os.getenv("AUTOHEAL_CACHE", "~/.autoheal_cache")).expanduser()
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
+PYPI_JSON = "https://pypi.org/pypi/{pkg}/json"
 _LOG = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------------
-# Public helpers
-# ------------------------------------------------------------------------
+
+# ── helper: resolve loose spec to latest satisfying version ─────────────
+@lru_cache(maxsize=None)
+def _resolve_latest_match(pkg: str, spec: str) -> str:
+    data = requests.get(PYPI_JSON.format(pkg=pkg), timeout=10).json()
+    all_versions = [Version(v) for v in data["releases"]]
+    matches = sorted([v for v in all_versions if v in SpecifierSet(spec)],
+                     reverse=True)
+    if not matches:
+        raise ValueError(f"{pkg}: no PyPI version satisfies '{spec}'")
+    return str(matches[0])
 
 
-def parse_requirements(path: str | os.PathLike) -> List[ReqLine]:
-    """Return a list of *pinned* requirements from the given file.
-
-    Raises
-    ------
-    ValueError
-        If **any** requirement is not pinned with the `==` operator or
-        the version string fails PEP 440 validation.
-    """
-
-    reqs: List[ReqLine] = []
-    line_rx = re.compile(r"^\s*([^#\s].*?)\s*(?:#.*)?$")
-    path = Path(path)
-    if not path.is_file():
-        raise FileNotFoundError(path)
-
-    with path.open(encoding="utf-8") as fh:
-        for lineno, raw in enumerate(fh, 1):
-            m = line_rx.match(raw)
-            if not m:
-                continue  # blank line or comment
-            token = m.group(1)
-
-            # Ignore editable installs & direct VCS refs for now.
-            if token.startswith("-e ") or token.startswith("git+"):
-                _LOG.warning("[line %d] skipping VCS/editable requirement: %s", lineno, token)
-                continue
-
-            try:
-                r = Requirement(token)
-            except Exception as exc:  # pragma: no cover – rare
-                raise ValueError(f"[line {lineno}] cannot parse: {token}\n→ {exc}") from exc
-
-            # Evaluate environment marker (e.g. ; python_version<'3.9')
-            if r.marker and not r.marker.evaluate(default_environment()):
-                continue
-
-            name = r.name.split("[", 1)[0].lower()  # strip extras
-
-            # Enforce pinning (==)
-            eq_pins = [s for s in r.specifier if s.operator == "=="]
-            if not eq_pins:
-                raise ValueError(
-                    f"[line {lineno}] '{name}' is not pinned – autoheal scans only '==X.Y.Z' pins.")
-            version = eq_pins[0].version
-            try:
-                Version(version)
-            except InvalidVersion as exc:
-                raise ValueError(f"[line {lineno}] '{name}' has invalid version '{version}': {exc}") from exc
-
-            reqs.append(ReqLine(raw=token.strip(), name=name, version=version))
-
-    if not reqs:
-        raise ValueError("No valid pinned requirements found – aborting.")
-    return reqs
-
-
-# ------------------------------------------------------------------------
-# deps.dev fetcher with disk‑cache and retry
-# ------------------------------------------------------------------------
-
-
+# ── disk-cache helpers for deps.dev responses ───────────────────────────
 def _cache_file(name: str, version: str) -> Path:
     return CACHE_DIR / f"{name.lower()}=={version}.json"
 
 
-def _read_cache(path: Path) -> dict | None:
+def _read_cache(path: Path):
     try:
         return json.loads(path.read_text()) if path.exists() else None
     except json.JSONDecodeError:
         return None
 
 
-def _write_cache(path: Path, payload: dict) -> None:
+def _write_cache(path: Path, obj: dict):
     try:
-        path.write_text(json.dumps(payload))
+        path.write_text(json.dumps(obj))
     except OSError:
-        pass  # non‑fatal – cache is best‑effort
+        pass
 
 
 @lru_cache(maxsize=None)
 def _fetch_remote(name: str, version: str) -> dict:
-    url = f"{DEPSDEV_BASE}/systems/PyPI/packages/{name}/versions/{version}:dependencies"
-    resp = requests.get(url, timeout=10)
-    if resp.status_code == 404:
+    url = f"{DEPSDEV_BASE}/systems/PYPI/packages/{name}/versions/{version}:dependencies"
+    r = requests.get(url, timeout=10)
+    if r.status_code == 404:
         return {}
-    resp.raise_for_status()
-    return resp.json()
+    r.raise_for_status()
+    return r.json()
 
 
-def _get_deps_payload(name: str, version: str) -> dict:
-    cache_path = _cache_file(name, version)
-    cached = _read_cache(cache_path)
+def _get_payload(name: str, version: str) -> dict:
+    path = _cache_file(name, version)
+    cached = _read_cache(path)
     if cached is not None:
         return cached
+    data = _fetch_remote(name, version)
+    _write_cache(path, data)
+    return data
 
-    retries, delay = 3, 0.5
-    for n in range(retries):
+
+# ── public helpers ──────────────────────────────────────────────────────
+def parse_requirements(path: str | os.PathLike) -> List[ReqLine]:
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+
+    parsed: List[ReqLine] = []
+    line_rx = re.compile(r"^\s*([^#\s].*?)\s*(?:#.*)?$")
+    for lineno, raw in enumerate(path.open(encoding="utf-8"), 1):
+        m = line_rx.match(raw)
+        if not m:
+            continue
+        token = m.group(1)
+        if token.startswith("-e ") or token.startswith("git+"):
+            _LOG.warning("[line %d] skipping VCS/editable: %s", lineno, token)
+            continue
+        req = Requirement(token)
+        if req.marker and not req.marker.evaluate(default_environment()):
+            continue
+
+        name = req.name.split("[", 1)[0].lower()
+        eq_pin = [s for s in req.specifier if s.operator == "=="]
+        if eq_pin:
+            version = eq_pin[0].version
+        else:
+            spec_text = str(req.specifier) if req.specifier else ">=0"
+            version = _resolve_latest_match(name, spec_text)
+            _LOG.info("[line %d] '%s %s' → %s", lineno, name, spec_text, version)
         try:
-            payload = _fetch_remote(name, version)
-            _write_cache(cache_path, payload)
-            return payload
-        except requests.RequestException as exc:
-            if n == retries - 1:
-                raise
-            _LOG.warning("deps.dev fetch failed (%s==%s) – retry %d/%d", name, version, n + 1, retries)
-            time.sleep(delay)
-            delay *= 2
-    return {}
+            Version(version)
+        except InvalidVersion as exc:
+            raise ValueError(f"[line {lineno}] invalid version '{version}': {exc}") from exc
+        parsed.append(ReqLine(raw=token.strip(), name=name, version=version))
+    if not parsed:
+        raise ValueError("No valid requirements found.")
+    return parsed
 
-
-# ------------------------------------------------------------------------
-# Graph builder
-# ------------------------------------------------------------------------
 
 def build_graph(reqs: List[ReqLine]) -> nx.DiGraph:
-    """Return a fully‑resolved dependency graph for *pinned* requirements.
-
-    Notes
-    -----
-    * Nodes are `(name, version)` tuples (both lowercase).
-    * Node attrs:
-        • `is_direct` (bool)
-        • `depth`      (int)  – 1 for direct, >=2 for transitives
-    """
-
     g: nx.DiGraph = nx.DiGraph()
     frontier: List[Tuple[str, str, int]] = []
     visited: Set[Tuple[str, str]] = set()
-
-    # Seed with direct requirements
     for r in reqs:
         g.add_node((r.name, r.version), is_direct=True, depth=1)
         frontier.append((r.name, r.version, 1))
@@ -191,16 +128,13 @@ def build_graph(reqs: List[ReqLine]) -> nx.DiGraph:
         if (pkg, ver) in visited:
             continue
         visited.add((pkg, ver))
-
-        payload = _get_deps_payload(pkg, ver)
+        payload = _get_payload(pkg, ver)
         for dep in payload.get("dependencies", []):
-            dep_name = dep["package"]["name"].lower()
-            dep_ver = dep["version"] or ""  # can be empty for optional markers
-            if not dep_ver:
-                continue  # skip unpinned / optional requirements
-
-            g.add_node((dep_name, dep_ver), is_direct=False, depth=depth + 1)
-            g.add_edge((pkg, ver), (dep_name, dep_ver))
-            frontier.append((dep_name, dep_ver, depth + 1))
-
+            dname = dep["package"]["name"].lower()
+            dver = dep["version"] or ""
+            if not dver:
+                continue
+            g.add_node((dname, dver), is_direct=False, depth=depth + 1)
+            g.add_edge((pkg, ver), (dname, dver))
+            frontier.append((dname, dver, depth + 1))
     return g

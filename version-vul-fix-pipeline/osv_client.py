@@ -1,34 +1,16 @@
-"""osv_client.py
-============================================================
-Query the Open‑Source Vulnerability (OSV) API for every node in a
-dependency graph and generate a `VulnReport`.
-
-Only PyPI packages are supported in v1. The function `scan()` is the
-public entry‑point – importable by a CLI, web service, or Jupyter
-notebook.
-"""
+"""osv_client.py  – batch query OSV API."""
 
 from __future__ import annotations
+import sys, requests, networkx as nx
+from typing import List
+from autoheal_types import AffectedRange, Finding, Vuln, VulnReport
 
-import logging
-import sys
-from typing import Iterable, List
+OSV = "https://api.osv.dev/v1/querybatch"
 
-import networkx as nx
-import requests
 
-from types import AffectedRange, Finding, Vuln, VulnReport
-
-LOG = logging.getLogger(__name__)
-OSV_BATCH_ENDPOINT = "https://api.osv.dev/v1/querybatch"
-
-# ------------------------------------------------------------------------
-# Helper utilities
-# ------------------------------------------------------------------------
-
-def _chunk(iterable: Iterable, size: int):
+def _chunk(it, size):
     buf = []
-    for item in iterable:
+    for item in it:
         buf.append(item)
         if len(buf) == size:
             yield buf
@@ -37,83 +19,45 @@ def _chunk(iterable: Iterable, size: int):
         yield buf
 
 
-def _to_range(obj: dict) -> AffectedRange:
-    events = obj.get("events", [])
-    introduced = events[0].get("introduced") if events else None
-    fixed = events[-1].get("fixed") if events else None
-    return AffectedRange(introduced=introduced, fixed=fixed, type=obj["type"])
+def _to_range(r):
+    ev = r.get("events", [])
+    return AffectedRange(
+        introduced=ev[0].get("introduced") if ev else None,
+        fixed=ev[-1].get("fixed") if ev else None,
+        type=r["type"],
+    )
 
 
-# ------------------------------------------------------------------------
-# Public API
-# ------------------------------------------------------------------------
-
-def scan(graph: nx.DiGraph, progress: bool = True) -> VulnReport:
-    """Return a `VulnReport` for every package‑version node in *graph*.
-
-    Parameters
-    ----------
-    graph : nx.DiGraph
-        Created by `deps_graph.build_graph()`; nodes are `(name, version)`.
-    progress : bool, default=True
-        Show a progress bar if *tqdm* is installed and stderr is a TTY.
-    """
-
+def scan(graph: nx.DiGraph, *, progress=True) -> VulnReport:
     nodes = list(graph.nodes)
-    queries = [
-        {
-            "package": {"name": name, "ecosystem": "PyPI"},
-            "version": ver,
-        }
-        for name, ver in nodes
-    ]
-
-    findings: List[Finding] = []
-
-    # Lazy import tqdm only when useful
-    iterator = range(0, len(queries), 1000)
+    queries = [{"package": {"name": n[0], "ecosystem": "PyPI"}, "version": n[1]} for n in nodes]
+    iterator = _chunk(range(len(queries)), 1000)
     if progress and sys.stderr.isatty():
         try:
             from tqdm import tqdm
-
             iterator = tqdm(iterator, desc="OSV", unit="pkg")
         except ModuleNotFoundError:
             pass
 
-    for start in iterator:
-        chunk = queries[start : start + 1000]
-        resp = requests.post(OSV_BATCH_ENDPOINT, json={"queries": chunk}, timeout=30)
-        resp.raise_for_status()
-        results = resp.json()["results"]
-
-        for node_q, result in zip(chunk, results):
-            pkg = node_q["package"]["name"].lower()
-            ver = node_q["version"]
-            is_direct = graph.nodes[(pkg, ver)].get("is_direct", False)
-
-            vulns: List[Vuln] = []
-            for osv in result.get("vulns", []):
-                ranges = [_to_range(r) for r in osv.get("ranges", [])]
-                cvss = None
-                for sev in osv.get("severity", []):
-                    if sev.get("type") == "CVSS_V3":
-                        try:
-                            score = float(sev["score"])
-                            cvss = max(cvss or 0.0, score)
-                        except (ValueError, TypeError):
-                            pass
-                vulns.append(
-                    Vuln(
-                        id=osv["id"],
-                        summary=osv.get("summary", ""),
-                        details_url=f"https://osv.dev/{osv['id']}",
-                        severity=cvss,
-                        ranges=ranges,
-                    )
+    findings: List[Finding] = []
+    for start_chunk in iterator:
+        chunk = queries[start_chunk : start_chunk + 1000]
+        res = requests.post(OSV, json={"queries": chunk}, timeout=30).json()["results"]
+        for q, r in zip(chunk, res):
+            pkg, ver = q["package"]["name"], q["version"]
+            is_direct = graph.nodes[(pkg, ver)]["is_direct"]
+            vulns = [
+                Vuln(
+                    id=v["id"],
+                    summary=v.get("summary", ""),
+                    details_url=f"https://osv.dev/{v['id']}",
+                    severity=max(
+                        (float(s["score"]) for s in v.get("severity", []) if s["type"] == "CVSS_V3"),
+                        default=None,
+                    ),
+                    ranges=[_to_range(rr) for rr in v.get("ranges", [])],
                 )
-
-            findings.append(
-                Finding(package=pkg, current=ver, is_direct=is_direct, vulns=vulns)
-            )
-
+                for v in r.get("vulns", [])
+            ]
+            findings.append(Finding(package=pkg, current=ver, is_direct=is_direct, vulns=vulns))
     return VulnReport(findings=findings, graph=graph)

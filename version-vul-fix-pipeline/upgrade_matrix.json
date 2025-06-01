@@ -1,0 +1,20 @@
+[
+  {
+    "package": "flask",
+    "current": "2.0.2",
+    "dependencyType": "DIRECT",
+    "candidates": []
+  },
+  {
+    "package": "jinja2",
+    "current": "2.10",
+    "dependencyType": "DIRECT",
+    "candidates": []
+  },
+  {
+    "package": "urllib3",
+    "current": "1.25.11",
+    "dependencyType": "DIRECT",
+    "candidates": []
+  }
+]
