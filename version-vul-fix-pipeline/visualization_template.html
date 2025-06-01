@@ -892,26 +892,41 @@
 
       // Vulnerabilities
       const vulnList = document.getElementById('vulnerabilityList');
-      vulnList.innerHTML = '';
-      if (currentPackageData.vulnerabilities.length === 0) {
-        vulnList.innerHTML = '<div class="no-items">🎉 No known vulnerabilities!</div>';
-      } else {
-        currentPackageData.vulnerabilities.forEach(vuln => {
-          const vulnDiv = document.createElement('div');
-          vulnDiv.className = 'vulnerability-item';
-          const id = vuln.cve_id || vuln.id || 'Unknown CVE';
-          const sev = (vuln.severity || 'Unknown').toLowerCase();
-          const score = vuln.cvss_score || vuln.score || 'N/A';
-          const desc = vuln.description || vuln.summary || 'No description available';
-          vulnDiv.innerHTML =
-            '<div class="vuln-header">' +
-              '<span class="vuln-id">' + id + '</span>' +
-              '<span class="severity-badge severity-' + sev + '">' + vuln.severity + ' (' + score + ')</span>' +
-            '</div>' +
-            '<div>' + desc + '</div>';
-          vulnList.appendChild(vulnDiv);
-        });
-      }
+vulnList.innerHTML = '';
+if (currentPackageData.vulnerabilities.length === 0) {
+  vulnList.innerHTML = '<div class="no-items">🎉 No known vulnerabilities!</div>';
+} else {
+  currentPackageData.vulnerabilities.forEach(vuln => {
+    const vulnDiv = document.createElement('div');
+    vulnDiv.className = 'vulnerability-item';
+    
+    const fixCount = vuln.number_of_versions_with_issue_fixed || 0;
+    const depType = vuln.dependencyType || 'Unknown';
+    
+    // Determine severity based on fix count and dependency type
+    let severity = 'Medium';
+    let severityClass = 'medium';
+    if (depType === 'DIRECT' && fixCount > 5) {
+      severity = 'High';
+      severityClass = 'high';
+    } else if (depType === 'DIRECT') {
+      severity = 'Medium';
+      severityClass = 'medium';
+    } else {
+      severity = 'Low';
+      severityClass = 'low';
+    }
+    
+    vulnDiv.innerHTML =
+      '<div class="vuln-header">' +
+        '<span class="vuln-id">Security Issue Detected</span>' +
+        '<span class="severity-badge severity-' + severityClass + '">' + severity + '</span>' +
+      '</div>' +
+      '<div><strong>Dependency Type:</strong> ' + depType + '</div>' +
+      '<div><strong>Available Fixes:</strong> ' + fixCount + ' versions with security improvements</div>';
+    vulnList.appendChild(vulnDiv);
+  });
+}
     }
 
     // Return to main view
