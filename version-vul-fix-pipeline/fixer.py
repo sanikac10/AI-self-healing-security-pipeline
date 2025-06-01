@@ -30,11 +30,10 @@ FIX_FUNCTION_SCHEMA = {
 }
 
 class FixSelector:
-    def __init__(self, model_name="gpt-4o", api_key=None, base_url=None):
+    def __init__(self, model_name="gpt-4o", api_key=None, base_url=None, validator=None):
         self.model_name = model_name
-        self.client = openai.OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        self.client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.validator = validator  # injected validation function
 
     def _sort_candidates(self, current_version, candidates):
         def version_to_tuple(v):
@@ -51,17 +50,19 @@ class FixSelector:
             return sum(abs(a - b) * (10 ** (length - i - 1)) for i, (a, b) in enumerate(zip(cur, cand)))
 
         return sorted(candidates, key=lambda c: distance(c["version"]))
-
-
+    
     def _auto_choose_fix(self, pkg, current, candidates):
         sorted_candidates = self._sort_candidates(current, candidates)
-        print(sorted_candidates)
-        top = sorted_candidates[0]
-        return {
-            "package": pkg,
-            "chosen_version": top["version"],
-            "rationale": f"Closest safe version to current ({current})."
-        }
+        for c in sorted_candidates:
+            if self.validator is None or self.validator(pkg, c["version"]):
+                return {
+                    "package": pkg,
+                    "chosen_version": c["version"],
+                    "rationale": f"Closest working version to current ({current})."
+                }
+
+        raise ValueError(f"No valid version found for {pkg}")
+
 
     def choose_fix(self, package_info: Dict, use_llm=True) -> Dict:
         if not use_llm:
