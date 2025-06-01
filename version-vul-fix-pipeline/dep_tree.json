@@ -1,0 +1,94 @@
+{
+  "nodes": [
+    {
+      "package": "urllib3",
+      "version": "2.4.0",
+      "is_direct": false,
+      "depth": 2
+    },
+    {
+      "package": "requests",
+      "version": "2.32.3",
+      "is_direct": true,
+      "depth": 1
+    },
+    {
+      "package": "pandas",
+      "version": "unknown",
+      "is_direct": true,
+      "depth": 1
+    },
+    {
+      "package": "flask",
+      "version": "unknown",
+      "is_direct": true,
+      "depth": 1
+    },
+    {
+      "package": "certifi",
+      "version": "2025.4.26",
+      "is_direct": false,
+      "depth": 2
+    },
+    {
+      "package": "scikit-learn",
+      "version": "unknown",
+      "is_direct": true,
+      "depth": 1
+    },
+    {
+      "package": "idna",
+      "version": "3.10",
+      "is_direct": false,
+      "depth": 2
+    },
+    {
+      "package": "charset-normalizer",
+      "version": "3.4.2",
+      "is_direct": false,
+      "depth": 2
+    }
+  ],
+  "edges": [
+    {
+      "from": [
+        "requests",
+        "2.32.3"
+      ],
+      "to": [
+        "certifi",
+        "2025.4.26"
+      ]
+    },
+    {
+      "from": [
+        "requests",
+        "2.32.3"
+      ],
+      "to": [
+        "charset-normalizer",
+        "3.4.2"
+      ]
+    },
+    {
+      "from": [
+        "requests",
+        "2.32.3"
+      ],
+      "to": [
+        "idna",
+        "3.10"
+      ]
+    },
+    {
+      "from": [
+        "requests",
+        "2.32.3"
+      ],
+      "to": [
+        "urllib3",
+        "2.4.0"
+      ]
+    }
+  ]
+}
