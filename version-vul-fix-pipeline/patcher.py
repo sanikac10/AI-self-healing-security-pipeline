@@ -23,17 +23,28 @@ def patch_requirements(requirements_path: str, fixes: dict[str, str]):
     with open(requirements_path, "w") as f:
         f.writelines(new_lines)
 
-def run_tests(requirements_path="requirements.txt") -> bool:
+
+def run_tests(requirements_path="requirements.txt") -> (bool, str):
     try:
         print("🔧 Installing dependencies...")
-        subprocess.run(["pip", "install", "-r", requirements_path], check=True)
+        install_proc = subprocess.run(
+            ["pip", "install", "-r", requirements_path],
+            check=True,
+            capture_output=True,
+            text=True
+        )
 
         print("🧪 Running tests...")
-        subprocess.run(["pytest"], check=True)
+        test_proc = subprocess.run(
+            ["pytest"],
+            check=True,
+            capture_output=True,
+            text=True
+        )
 
-        return True
+        return True, install_proc.stdout + test_proc.stdout
+
     except subprocess.CalledProcessError as e:
-        print("❌ Error during install or test:", e)
-        return False
+        return False, e.stderr
 
 
