@@ -3,6 +3,7 @@ import openai
 from dotenv import load_dotenv
 from typing import List, Dict
 from packaging.version import parse as parse_version
+import json
 
 load_dotenv()
 
@@ -87,5 +88,5 @@ class FixSelector:
             tool_choice="required"
         )
 
-        return response.choices[0].message.tool_calls[0].function.arguments
+        return json.loads(response.choices[0].message.tool_calls[0].function.arguments)
 

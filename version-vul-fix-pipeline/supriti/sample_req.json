@@ -1,5 +1,0 @@
-{
-  "package": "flask",
-  "chosen_version": "2.1.0",
-  "rationale": "Version 2.1.0 eliminates all vulnerabilities and has low breaking changes based on semver."
-}
